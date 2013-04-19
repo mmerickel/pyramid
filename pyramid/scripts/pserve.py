@@ -152,6 +152,7 @@ class PServeCommand(object):
 
     _reloader_environ_key = 'PYTHON_RELOADER_SHOULD_RUN'
     _monitor_environ_key = 'PASTE_MONITOR_SHOULD_RUN'
+    _daemonize_environ_key = 'PASTE_ALREADY_DAEMONIZED'
 
     possible_subcommands = ('start', 'stop', 'restart', 'status')
 
@@ -194,16 +195,6 @@ class PServeCommand(object):
             cmd = self.args[1]
         else:
             cmd = None
-
-        if self.options.reload:
-            if os.environ.get(self._reloader_environ_key):
-                if self.verbose > 1:
-                    self.out('Running reloading file monitor')
-                install_reloader(int(self.options.reload_interval), [app_spec])
-                # if self.requires_config_file:
-                #     watch_file(self.args[0])
-            else:
-                return self.restart_with_reloader()
 
         if cmd not in (None, 'start', 'stop', 'restart', 'status'):
             self.out(
@@ -267,7 +258,8 @@ class PServeCommand(object):
                 raise ValueError(msg)
             writeable_pid_file.close()
 
-        if getattr(self.options, 'daemon', False):
+        if (getattr(self.options, 'daemon', False)
+            and not os.environ.get(self._daemonize_environ_key)):
             try:
                 self.daemonize()
             except DaemonizeException as ex:
@@ -275,18 +267,31 @@ class PServeCommand(object):
                     self.out(str(ex))
                 return 2
 
+        # record pid file if we are not in a subprocess
+        if (self.options.pid_file
+            and not (os.environ.get(self._reloader_environ_key)
+                     or os.environ.get(self._monitor_environ_key))):
+            self.record_pid(self.options.pid_file)
+
+        if (self.options.reload
+            and not os.environ.get(self._reloader_environ_key)):
+            return self.restart_with_reloader()
+
         if (self.options.monitor_restart
             and not os.environ.get(self._monitor_environ_key)):
             return self.restart_with_monitor()
-
-        if self.options.pid_file:
-            self.record_pid(self.options.pid_file)
 
         if self.options.log_file:
             stdout_log = LazyWriter(self.options.log_file, 'a')
             sys.stdout = stdout_log
             sys.stderr = stdout_log
             logging.basicConfig(stream=stdout_log)
+
+        # install the reloader after the process has been setup
+        if self.options.reload:
+            if self.verbose > 1:
+                self.out('Running reloading file monitor')
+            install_reloader(int(self.options.reload_interval), [app_spec])
 
         log_fn = app_spec
         if log_fn.startswith('config:'):
@@ -502,6 +507,7 @@ class PServeCommand(object):
                 new_environ[self._reloader_environ_key] = 'true'
             else:
                 new_environ[self._monitor_environ_key] = 'true'
+            new_environ[self._daemonize_environ_key] = 'true'
             proc = None
             try:
                 try:
